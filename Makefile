@@ -12,3 +12,9 @@ mig-down:
 
 test:
 	go test ./...
+
+lint:
+	docker run --rm -v $(shell pwd):/app -w /app golangci/golangci-lint:v2.0.2 golangci-lint run
+
+migrate-config:
+	docker run --rm -v $(shell pwd):/app -w /app golangci/golangci-lint:v2.0.2 golangci-lint migrate

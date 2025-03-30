@@ -1,0 +1,18 @@
+@startuml
+entity Accounts {
+    id: string
+    first_name: string
+    last_name: string
+    email: string, unique
+    password: string
+    created_at: date
+    disabled_at: date
+}
+
+entity OutboxEvents {
+    id: int
+    name: string
+    payload: jsonb
+    published_at: date
+}
+@enduml

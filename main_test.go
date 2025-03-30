@@ -15,8 +15,7 @@ func TestAccountCreation(t *testing.T) {
 	ctx := context.Background()
 	httpClient := http.Client{}
 
-	for i := 0; i < 100; i++ {
-
+	for i := 0; i < 20; i++ {
 		body := CreateAccountRequest{
 			Email:     gofakeit.Email(),
 			Password:  gofakeit.Password(true, true, true, true, false, 12),

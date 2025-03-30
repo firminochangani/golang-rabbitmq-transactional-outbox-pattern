@@ -43,7 +43,7 @@ func main() {
 }
 
 func run() error {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	g, ctx := errgroup.WithContext(context.Background())
@@ -86,7 +86,7 @@ func run() error {
 
 	g.Go(func() error {
 		logger.Info("running the http service")
-		return app.startHttpService(ctx)
+		return app.startHttpService()
 	})
 
 	g.Go(func() error {
@@ -121,7 +121,7 @@ type AccountCreatedEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-func (a *App) startHttpService(ctx context.Context) error {
+func (a *App) startHttpService() error {
 	router := echo.New()
 	router.HideBanner = true
 
@@ -242,7 +242,7 @@ func (a *App) startEventHandlers(ctx context.Context) error {
 			a.logger.Info("[EVENT HANDLER] shutting down handler")
 			return nil
 		default:
-			a.logger.Info("[EVENT HANDLER] new event processed", "name", "AccountCreated", "payload", string(msg.Body))
+			a.logger.Info("[EVENT HANDLER] new event processed", "name", "AccountCreated")
 			_ = msg.Ack(false)
 		}
 	}
@@ -269,15 +269,19 @@ func (a *App) setupRabbitMq() error {
 }
 
 func (a *App) startOutboxPublisher(ctx context.Context) error {
+	// Query the oldest 5 events
 	rows, err := a.db.QueryContext(ctx, `SELECT id, name, payload, published_at FROM outbox_events ORDER BY published_at DESC LIMIT 5`)
 	if err != nil {
-		fmt.Println(err)
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 
 	var outboxEvents []OutboxEvent
 	for rows.Next() {
+		if rows.Err() != nil {
+			return err
+		}
+
 		var row OutboxEvent
 		err = rows.Scan(&row.ID, &row.Name, &row.Payload, &row.PublishedAt)
 		if err != nil {
@@ -290,19 +294,18 @@ func (a *App) startOutboxPublisher(ctx context.Context) error {
 	for _, outboxEvent := range outboxEvents {
 		err = a.publishEvent(ctx, outboxEvent.Name, outboxEvent.Payload)
 		if err != nil {
-			a.logger.Warn("[OUTBOX SCHEDULER] error publishing event from the outbox", "event", outboxEvent, "error", err)
+			a.logger.Warn("error publishing event from the outbox", "event", outboxEvent, "error", err)
 			continue
 		}
-		a.logger.Debug("[OUTBOX SCHEDULER] event published with success", "event_name", outboxEvent.Name, "payload", string(outboxEvent.Payload))
+		a.logger.Debug("event published with success", "event_name", outboxEvent.Name, "payload", string(outboxEvent.Payload))
 
 		// We assume that it's ok to have this event re-published later
 		_, err = a.db.ExecContext(ctx, `DELETE FROM outbox_events WHERE id = $1`, outboxEvent.ID)
 		if err != nil {
 			// Ideally alerts for this kind of warnings will have been set up
-			a.logger.Warn("[OUTBOX SCHEDULER] error deleting published event from the outbox", "event", outboxEvent, "error", err)
+			a.logger.Warn("error deleting published event from the outbox", "event", outboxEvent, "error", err)
 			continue
 		}
-
 	}
 
 	return nil
@@ -314,7 +317,7 @@ func (a *App) startOutboxPublisherScheduler(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			a.logger.Info("[OUTBOX SCHEDULER] the scheduler has been stopped via context cancellation")
+			a.logger.Info("the scheduler has been stopped via context cancellation")
 			return nil
 		case <-ticker.C:
 			err := a.startOutboxPublisher(ctx)

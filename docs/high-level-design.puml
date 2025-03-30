@@ -1,0 +1,27 @@
+@startuml
+actor User as U
+participant AccountSvc as svc
+database RelationalDB as db
+queue MessageBroker as mb
+participant EmailProvider as ep
+
+U -> svc: Account creation request
+group DB Transaction
+    svc -> db: Stores account details
+    svc -> db: Stores the event payload
+end
+svc --> U: Sends response
+
+group Outbox Scheduler running in background
+svc -> db: Query the oldest events stored
+svc -> mb: Publish the events
+svc -> db: Remove published events
+end
+
+group Event Handler running in background
+svc -> ep: Trigger email delivery
+end
+
+ep --> U: Eventually the account creation email is delivered to the user
+
+@enduml
