@@ -19,7 +19,7 @@ prevented from creating an account when that occurs, which leads us to the follo
 
 - Implementation of a robust authentication system;
 - Software design and architectural patterns such as ports and adapters;
-- Observability - Publishing events without a clear mechanism to manually requeue messages sent to the dead letter queue does not provide the reliability we are seeking by adopting a queueing system.
+- Observability
 - Immediate retries of message publishing
 - Idempotency
 

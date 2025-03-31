@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/kelseyhightower/envconfig"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq"
@@ -21,10 +22,19 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type Config struct {
+	HttpPort                         int    `envconfig:"HTTP_PORT"`
+	DatabaseURL                      string `envconfig:"DATABASE_URL"`
+	AmqpURL                          string `envconfig:"AMQP_URL"`
+	OutboxMaxEventsPerInterval       int    `envconfig:"OUTBOX_MAX_EVENTS_PER_INTERVAL"`
+	OutboxSchedulerIntervalInSeconds int    `envconfig:"OUTBOX_SCHEDULER_INTERVAL_IN_SECONDS"`
+}
+
 type App struct {
 	db          *sql.DB
 	amqpChannel *amqp.Channel
 	logger      *slog.Logger
+	config      *Config
 }
 
 type OutboxEvent struct {
@@ -43,12 +53,18 @@ func main() {
 }
 
 func run() error {
+	var config Config
+	err := envconfig.Process("", &config)
+	if err != nil {
+		return fmt.Errorf("unable to load env config: %v", err)
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	g, ctx := errgroup.WithContext(context.Background())
 
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+	db, err := sql.Open("postgres", config.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("unable to open conn to postgres: %v", err)
 	}
@@ -63,7 +79,7 @@ func run() error {
 		return fmt.Errorf("unable to apply migrations: %v", err)
 	}
 
-	amqpConn, err := amqp.Dial(os.Getenv("AMQP_URL"))
+	amqpConn, err := amqp.Dial(config.AmqpURL)
 	if err != nil {
 		return fmt.Errorf("unable to dial RabbitMQ: %v", err)
 	}
@@ -77,6 +93,7 @@ func run() error {
 		db:          db,
 		logger:      logger,
 		amqpChannel: amqpChannel,
+		config:      &config,
 	}
 
 	err = app.setupRabbitMq()
@@ -96,13 +113,7 @@ func run() error {
 
 	g.Go(func() error {
 		logger.Info("running outbox publisher")
-		err = app.startOutboxPublisherScheduler(ctx)
-		if err != nil {
-			logger.Error("error on outbox publisher scheduler", "error", err)
-			return err
-		}
-
-		return nil
+		return app.startOutboxPublisherScheduler(ctx)
 	})
 
 	return g.Wait()
@@ -127,14 +138,14 @@ func (a *App) startHttpService() error {
 
 	router.Use(middleware.Recover())
 	router.Use(middleware.Logger())
-	router.POST("/accounts", func(c echo.Context) error {
+	router.POST("/accounts", func(c echo.Context) (err error) {
 		var body CreateAccountRequest
-		err := c.Bind(&body)
+		err = c.Bind(&body)
 		if err != nil {
 			return err
 		}
 
-		rctx := c.Request().Context()
+		ctx := c.Request().Context()
 		accountID := ulid.Make().String()
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -145,9 +156,20 @@ func (a *App) startHttpService() error {
 		if err != nil {
 			return err
 		}
+		defer func() {
+			if err != nil {
+				txErr := tx.Rollback()
+				if txErr != nil {
+					a.logger.Error("error while rolling back the transaction", "error", txErr)
+				}
+				return
+			}
+
+			err = tx.Commit()
+		}()
 
 		_, err = tx.ExecContext(
-			rctx,
+			ctx,
 			`INSERT INTO accounts (id, first_name, last_name, email, password) VALUES ($1, $2, $3, $4, $5);`,
 			accountID,
 			body.FirstName,
@@ -157,11 +179,10 @@ func (a *App) startHttpService() error {
 		)
 		if err != nil {
 			a.logger.Debug(err.Error())
-			_ = tx.Rollback()
 			return err
 		}
 
-		err = a.publishEventToOutbox(rctx, tx, "AccountCreated", &AccountCreatedEvent{
+		err = a.publishEventToOutbox(ctx, tx, "AccountCreated", &AccountCreatedEvent{
 			AccountID: accountID,
 			Email:     body.Email,
 			CreatedAt: time.Now().UTC(),
@@ -169,11 +190,6 @@ func (a *App) startHttpService() error {
 		if err != nil {
 			_ = tx.Rollback()
 			return err
-		}
-
-		err = tx.Commit()
-		if err != nil {
-			return fmt.Errorf("error committing transaction: %v", err)
 		}
 
 		return c.JSON(http.StatusCreated, map[string]string{"message": "account created successfully"})
@@ -270,7 +286,11 @@ func (a *App) setupRabbitMq() error {
 
 func (a *App) startOutboxPublisher(ctx context.Context) error {
 	// Query the oldest 5 events
-	rows, err := a.db.QueryContext(ctx, `SELECT id, name, payload, published_at FROM outbox_events ORDER BY published_at DESC LIMIT 5`)
+	rows, err := a.db.QueryContext(
+		ctx,
+		`SELECT id, name, payload, published_at FROM outbox_events ORDER BY published_at ASC LIMIT ?`,
+		a.config.OutboxMaxEventsPerInterval,
+	)
 	if err != nil {
 		return err
 	}
@@ -312,7 +332,7 @@ func (a *App) startOutboxPublisher(ctx context.Context) error {
 }
 
 func (a *App) startOutboxPublisherScheduler(ctx context.Context) error {
-	ticker := time.NewTicker(time.Second * 5)
+	ticker := time.NewTicker(time.Second * time.Duration(a.config.OutboxSchedulerIntervalInSeconds))
 
 	for {
 		select {
